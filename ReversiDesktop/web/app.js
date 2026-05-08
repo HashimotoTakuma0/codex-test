@@ -62,6 +62,8 @@ const AI_LEVELS = {
   },
 };
 
+const AI_PROGRESS_YIELD_MS = 16;
+
 const ELEMENTS = {
   blackCount: document.querySelector("#black-count"),
   blackRole: document.querySelector("#black-role"),
@@ -83,6 +85,7 @@ const state = {
   isAnimating: false,
   lastMove: null,
   aiLevel: "strong",
+  aiSearchId: 0,
   mode: "solo",
 };
 
@@ -228,6 +231,70 @@ class ReversiGame {
     };
   }
 
+  async bestMoveDetailsAsync(player, profile, options = {}) {
+    const moves = this.orderedMoves(player, profile);
+    if (moves.length === 0) {
+      return null;
+    }
+
+    const depth = this.searchDepth(profile);
+    const table = new Map();
+    const beta = Number.POSITIVE_INFINITY;
+    const startedAt = performance.now();
+    const searchContext = {
+      cancelled: false,
+      lastYieldAt: startedAt,
+      nodes: 0,
+      onPulse: () => {
+        options.onProgress?.({
+          completed: 0,
+          total: moves.length,
+          elapsedMs: performance.now() - startedAt,
+        });
+      },
+      shouldCancel: options.shouldCancel,
+    };
+    let alpha = Number.NEGATIVE_INFINITY;
+    let bestMove = moves[0];
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (let index = 0; index < moves.length; index += 1) {
+      if (options.shouldCancel?.() === true || searchContext.cancelled) {
+        return null;
+      }
+
+      const move = moves[index];
+      const simulated = this.clone();
+      simulated.performMove(move, player);
+      const childScore = await simulated.negamaxAsync(opponentOf(player), depth - 1, -beta, -alpha, false, table, profile, searchContext);
+      if (searchContext.cancelled) {
+        return null;
+      }
+      const score = -childScore;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMove = move;
+      }
+      alpha = Math.max(alpha, score);
+
+      const completed = index + 1;
+      options.onProgress?.({
+        completed,
+        total: moves.length,
+        elapsedMs: performance.now() - startedAt,
+      });
+
+      if (completed < moves.length) {
+        await wait(AI_PROGRESS_YIELD_MS);
+      }
+    }
+
+    return {
+      move: bestMove,
+    };
+  }
+
   searchDepth(profile) {
     if (profile.id === "strong") {
       if (this.emptyCount <= 10) {
@@ -340,6 +407,70 @@ class ReversiGame {
       const simulated = this.clone();
       simulated.performMove(move, player);
       const score = -simulated.negamax(opponentOf(player), depth - 1, -beta, -localAlpha, false, table, profile);
+      bestScore = Math.max(bestScore, score);
+      localAlpha = Math.max(localAlpha, score);
+      if (localAlpha >= beta) {
+        break;
+      }
+    }
+
+    table.set(key, { depth, score: bestScore });
+    return bestScore;
+  }
+
+  async negamaxAsync(player, depth, alpha, beta, previousTurnWasPass, table, profile, context) {
+    context.nodes += 1;
+    if (context.nodes % 2048 === 0) {
+      const now = performance.now();
+      if (now - context.lastYieldAt >= 80) {
+        context.lastYieldAt = now;
+        context.onPulse?.();
+        await wait(0);
+        if (context.shouldCancel?.() === true) {
+          context.cancelled = true;
+          return 0;
+        }
+      }
+    }
+
+    const key = profile.id === "strong"
+      ? `${serializeBoard(this.board)}|${player}|${depth}|${previousTurnWasPass ? 1 : 0}|${profile.id}`
+      : `${serializeBoard(this.board)}|${player}|${previousTurnWasPass ? 1 : 0}|${profile.id}`;
+    const cached = table.get(key);
+    if (cached !== undefined && (profile.id === "strong" || cached.depth >= depth)) {
+      return cached.score;
+    }
+
+    if (this.isGameOver || (previousTurnWasPass && this.validMoves(player).length === 0)) {
+      const score = this.terminalScore(player);
+      table.set(key, { depth, score });
+      return score;
+    }
+
+    if (depth === 0) {
+      const score = this.evaluate(player, profile);
+      table.set(key, { depth, score });
+      return score;
+    }
+
+    const moves = this.orderedMoves(player, profile);
+    if (moves.length === 0) {
+      const score = -await this.negamaxAsync(opponentOf(player), depth, -beta, -alpha, true, table, profile, context);
+      table.set(key, { depth, score });
+      return score;
+    }
+
+    let localAlpha = alpha;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (const move of moves) {
+      if (context.cancelled) {
+        return 0;
+      }
+
+      const simulated = this.clone();
+      simulated.performMove(move, player);
+      const score = -await simulated.negamaxAsync(opponentOf(player), depth - 1, -beta, -localAlpha, false, table, profile, context);
       bestScore = Math.max(bestScore, score);
       localAlpha = Math.max(localAlpha, score);
       if (localAlpha >= beta) {
@@ -590,6 +721,42 @@ function serializeBoard(board) {
   return board.flat().map((cell) => (cell === null ? "." : cell === "black" ? "b" : "w")).join("");
 }
 
+function wait(milliseconds) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
+function formatDuration(milliseconds) {
+  if (milliseconds <= 0 || Number.isFinite(milliseconds) === false) {
+    return "推定中";
+  }
+
+  const seconds = Math.ceil(milliseconds / 1000);
+  if (seconds < 60) {
+    return `約${seconds}秒`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (remainingSeconds === 0) {
+    return `約${minutes}分`;
+  }
+  return `約${minutes}分${remainingSeconds}秒`;
+}
+
+function updateAIProgress(profile, progress) {
+  if (progress.completed === 0) {
+    updateStatus(`CPU（${profile.label}）思考中 0/${progress.total}・予測残り思考時間 推定中`);
+    return;
+  }
+
+  const remainingMoves = progress.total - progress.completed;
+  const averageMs = progress.elapsedMs / progress.completed;
+  const remainingMs = remainingMoves * averageMs;
+  updateStatus(`CPU（${profile.label}）思考中 ${progress.completed}/${progress.total}・予測残り思考時間 ${formatDuration(remainingMs)}`);
+}
+
 function createBoard() {
   ELEMENTS.board.innerHTML = "";
   boardCells.clear();
@@ -706,12 +873,27 @@ function scheduleAIMove() {
     return;
   }
 
+  const searchId = state.aiSearchId + 1;
+  const profile = currentAIProfile();
+  state.aiSearchId = searchId;
   state.aiThinking = true;
-  updateStatus(`CPU（${currentAIProfile().label}）が深く読んでいます…`);
+  updateStatus(`CPU（${profile.label}）思考中・予測残り思考時間 推定中`);
   renderBoard();
 
-  window.setTimeout(() => {
-    const details = state.game.bestMoveDetails("white", currentAIProfile());
+  window.setTimeout(async () => {
+    const details = await state.game.bestMoveDetailsAsync("white", profile, {
+      shouldCancel: () => searchId !== state.aiSearchId,
+      onProgress: (progress) => {
+        if (searchId === state.aiSearchId) {
+          updateAIProgress(profile, progress);
+        }
+      },
+    });
+
+    if (searchId !== state.aiSearchId) {
+      return;
+    }
+
     if (details === null) {
       state.aiThinking = false;
       advanceTurn();
@@ -809,6 +991,7 @@ function handleCellClick(position) {
 }
 
 function resetGame() {
+  state.aiSearchId += 1;
   state.game = new ReversiGame();
   state.displayedBoard = cloneBoard(state.game.board);
   state.currentPlayer = "black";
