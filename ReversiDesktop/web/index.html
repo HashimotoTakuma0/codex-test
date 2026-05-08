@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reversi Desktop</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <div class="backdrop backdrop-left"></div>
+      <div class="backdrop backdrop-right"></div>
+
+      <main class="layout">
+        <section class="hero panel">
+          <p class="eyebrow">Desktop Edition</p>
+          <h1>REVERSI</h1>
+          <p class="lede">
+            Mac と Windows に配りやすい形で作り直したオセロです。
+            強い CPU と、盤面の流れが見やすいパタパタ反転アニメーションを入れています。
+          </p>
+
+          <div class="mode-switch" role="tablist" aria-label="対戦モード">
+            <button type="button" class="mode-button is-active" data-mode="solo">ひとり</button>
+            <button type="button" class="mode-button" data-mode="versus">ふたり</button>
+          </div>
+
+          <div class="sidebar-scores">
+            <article class="score-card panel score-card-black">
+              <div class="score-card-head">
+                <span class="disc-chip disc-chip-black"></span>
+                <div>
+                  <p class="score-title">黒</p>
+                  <p class="score-role" id="black-role">あなた</p>
+                </div>
+              </div>
+              <strong class="score-value" id="black-count">2</strong>
+            </article>
+
+            <article class="score-card panel score-card-white">
+              <div class="score-card-head">
+                <span class="disc-chip disc-chip-white"></span>
+                <div>
+                  <p class="score-title">白</p>
+                  <p class="score-role" id="white-role">CPU</p>
+                </div>
+              </div>
+              <strong class="score-value" id="white-count">2</strong>
+            </article>
+          </div>
+        </section>
+
+        <section class="board-column">
+          <section class="panel board-panel">
+            <div class="board-header">
+              <div>
+                <p class="eyebrow">Board</p>
+                <p class="board-status" id="status-text">あなたの番です</p>
+              </div>
+              <button type="button" id="reset-button" class="reset-button">最初からやり直す</button>
+            </div>
+
+            <div id="board" class="board" aria-label="リバーシ盤"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+  </html>
