@@ -147,6 +147,42 @@ button {
   color: var(--ink);
 }
 
+.difficulty-panel {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.difficulty-panel.is-hidden {
+  display: none;
+}
+
+.difficulty-switch {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.45rem;
+}
+
+.difficulty-button {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  padding: 0.72rem 0.9rem;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(248, 242, 220, 0.86);
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.difficulty-button:hover {
+  transform: translateY(-1px);
+}
+
+.difficulty-button.is-active {
+  background: rgba(255, 217, 93, 0.18);
+  border-color: rgba(255, 217, 93, 0.55);
+  color: #fff6d3;
+}
+
 .sidebar-scores {
   display: grid;
   grid-template-columns: 1fr;
@@ -419,6 +455,11 @@ button {
   .mode-button {
     padding: 0.7rem 0.8rem;
     font-size: 0.95rem;
+  }
+
+  .difficulty-button {
+    padding: 0.62rem 0.7rem;
+    font-size: 0.9rem;
   }
 
   .sidebar-scores {

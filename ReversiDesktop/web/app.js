@@ -51,10 +51,23 @@ const CORNER_NEIGHBORS = [
   ],
 ];
 
+const AI_LEVELS = {
+  strong: {
+    id: "strong",
+    label: "強い",
+  },
+  strongest: {
+    id: "strongest",
+    label: "最強",
+  },
+};
+
 const ELEMENTS = {
   blackCount: document.querySelector("#black-count"),
   blackRole: document.querySelector("#black-role"),
   board: document.querySelector("#board"),
+  difficultyButtons: [...document.querySelectorAll(".difficulty-button")],
+  difficultyPanel: document.querySelector("#difficulty-panel"),
   modeButtons: [...document.querySelectorAll(".mode-button")],
   resetButton: document.querySelector("#reset-button"),
   statusText: document.querySelector("#status-text"),
@@ -69,6 +82,7 @@ const state = {
   game: null,
   isAnimating: false,
   lastMove: null,
+  aiLevel: "strongest",
   mode: "solo",
 };
 
@@ -184,13 +198,13 @@ class ReversiGame {
     return black > white ? "black" : "white";
   }
 
-  bestMoveDetails(player) {
-    const moves = this.orderedMoves(player);
+  bestMoveDetails(player, profile) {
+    const moves = this.orderedMoves(player, profile);
     if (moves.length === 0) {
       return null;
     }
 
-    const depth = this.searchDepth();
+    const depth = this.searchDepth(profile);
     const table = new Map();
     const beta = Number.POSITIVE_INFINITY;
     let alpha = Number.NEGATIVE_INFINITY;
@@ -200,7 +214,7 @@ class ReversiGame {
     for (const move of moves) {
       const simulated = this.clone();
       simulated.performMove(move, player);
-      const score = -simulated.negamax(opponentOf(player), depth - 1, -beta, -alpha, false, table);
+      const score = -simulated.negamax(opponentOf(player), depth - 1, -beta, -alpha, false, table, profile);
 
       if (score > bestScore) {
         bestScore = score;
@@ -214,26 +228,70 @@ class ReversiGame {
     };
   }
 
-  searchDepth() {
-    if (this.emptyCount <= 10) {
+  searchDepth(profile) {
+    if (profile.id === "strong") {
+      if (this.emptyCount <= 10) {
+        return this.emptyCount;
+      }
+      if (this.emptyCount <= 16) {
+        return 8;
+      }
+      if (this.emptyCount <= 28) {
+        return 6;
+      }
+      return 5;
+    }
+
+    if (this.emptyCount <= 14) {
       return this.emptyCount;
     }
-    if (this.emptyCount <= 16) {
-      return 8;
+    if (this.emptyCount <= 18) {
+      return 13;
     }
-    if (this.emptyCount <= 28) {
-      return 6;
+    if (this.emptyCount <= 24) {
+      return 12;
     }
-    return 5;
+    if (this.emptyCount <= 32) {
+      return 10;
+    }
+    if (this.emptyCount <= 44) {
+      return 9;
+    }
+    if (this.emptyCount <= 52) {
+      return 7;
+    }
+    return 6;
   }
 
-  orderedMoves(player) {
-    return this.validMoves(player).sort((lhs, rhs) => this.moveOrderingScore(rhs, player) - this.moveOrderingScore(lhs, player));
+  orderedMoves(player, profile) {
+    return this.validMoves(player).sort((lhs, rhs) => this.moveOrderingScore(rhs, player, profile) - this.moveOrderingScore(lhs, player, profile));
   }
 
-  moveOrderingScore(move, player) {
-    const captured = this.captures(move, player).length;
-    return (POSITIONAL_WEIGHTS[move.row][move.column] * 10) + (captured * 5) + this.cornerDangerAdjustment(move);
+  moveOrderingScore(move, player, profile) {
+    if (profile.id === "strong") {
+      const captured = this.captures(move, player).length;
+      return (POSITIONAL_WEIGHTS[move.row][move.column] * 10) + (captured * 5) + this.cornerDangerAdjustment(move);
+    }
+
+    if (CORNERS.some((corner) => samePosition(corner, move))) {
+      return 100000;
+    }
+
+    const simulated = this.clone();
+    const captured = simulated.performMove(move, player).length;
+    const opponent = opponentOf(player);
+    const opponentMoves = simulated.validMoves(opponent).length;
+    const selfMoves = simulated.validMoves(player).length;
+    const opponentCornerMoves = simulated.validCornerMoves(opponent);
+    const stableEdges = simulated.stableEdgeDiscs(player) - simulated.stableEdgeDiscs(opponent);
+
+    return (POSITIONAL_WEIGHTS[move.row][move.column] * 14)
+      + (selfMoves * 22)
+      - (opponentMoves * 30)
+      - (opponentCornerMoves * 700)
+      + (stableEdges * 80)
+      + this.cornerDangerAdjustment(move)
+      + captured;
   }
 
   cornerDangerAdjustment(move) {
@@ -247,28 +305,31 @@ class ReversiGame {
     return 0;
   }
 
-  negamax(player, depth, alpha, beta, previousTurnWasPass, table) {
-    const key = `${serializeBoard(this.board)}|${player}|${depth}|${previousTurnWasPass ? 1 : 0}`;
-    if (table.has(key)) {
-      return table.get(key);
+  negamax(player, depth, alpha, beta, previousTurnWasPass, table, profile) {
+    const key = profile.id === "strong"
+      ? `${serializeBoard(this.board)}|${player}|${depth}|${previousTurnWasPass ? 1 : 0}|${profile.id}`
+      : `${serializeBoard(this.board)}|${player}|${previousTurnWasPass ? 1 : 0}|${profile.id}`;
+    const cached = table.get(key);
+    if (cached !== undefined && (profile.id === "strong" || cached.depth >= depth)) {
+      return cached.score;
     }
 
     if (this.isGameOver || (previousTurnWasPass && this.validMoves(player).length === 0)) {
       const score = this.terminalScore(player);
-      table.set(key, score);
+      table.set(key, { depth, score });
       return score;
     }
 
     if (depth === 0) {
-      const score = this.evaluate(player);
-      table.set(key, score);
+      const score = this.evaluate(player, profile);
+      table.set(key, { depth, score });
       return score;
     }
 
-    const moves = this.orderedMoves(player);
+    const moves = this.orderedMoves(player, profile);
     if (moves.length === 0) {
-      const score = -this.negamax(opponentOf(player), depth, -beta, -alpha, true, table);
-      table.set(key, score);
+      const score = -this.negamax(opponentOf(player), depth, -beta, -alpha, true, table, profile);
+      table.set(key, { depth, score });
       return score;
     }
 
@@ -278,7 +339,7 @@ class ReversiGame {
     for (const move of moves) {
       const simulated = this.clone();
       simulated.performMove(move, player);
-      const score = -simulated.negamax(opponentOf(player), depth - 1, -beta, -localAlpha, false, table);
+      const score = -simulated.negamax(opponentOf(player), depth - 1, -beta, -localAlpha, false, table, profile);
       bestScore = Math.max(bestScore, score);
       localAlpha = Math.max(localAlpha, score);
       if (localAlpha >= beta) {
@@ -286,7 +347,7 @@ class ReversiGame {
       }
     }
 
-    table.set(key, bestScore);
+    table.set(key, { depth, score: bestScore });
     return bestScore;
   }
 
@@ -298,7 +359,7 @@ class ReversiGame {
     return (difference * 10000) + (difference > 0 ? this.emptyCount : -this.emptyCount);
   }
 
-  evaluate(player) {
+  evaluate(player, profile) {
     const opponent = opponentOf(player);
     const myMobility = this.validMoves(player).length;
     const opponentMobility = this.validMoves(opponent).length;
@@ -329,9 +390,11 @@ class ReversiGame {
     const cornerPressureScore = (myCornerPressure - opponentCornerPressure) * 120;
 
     const discDifference = this.count(player) - this.count(opponent);
-    const discWeight = this.emptyCount <= 12 ? 140 : this.emptyCount <= 22 ? 35 : 8;
+    const discWeight = profile.id === "strong"
+      ? (this.emptyCount <= 12 ? 140 : this.emptyCount <= 22 ? 35 : 8)
+      : (this.emptyCount <= 12 ? 200 : this.emptyCount <= 24 ? 24 : 2);
 
-    return cornerScore
+    let score = cornerScore
       + mobilityScore
       + positionalScore
       + frontierScore
@@ -339,6 +402,24 @@ class ReversiGame {
       + potentialMobilityScore
       + cornerPressureScore
       + (discDifference * discWeight);
+
+    if (profile.id === "strongest") {
+      const myStableEdges = this.stableEdgeDiscs(player);
+      const opponentStableEdges = this.stableEdgeDiscs(opponent);
+      const stableEdgeScore = (myStableEdges - opponentStableEdges) * 180;
+
+      const myFullEdges = this.fullEdgeCount(player);
+      const opponentFullEdges = this.fullEdgeCount(opponent);
+      const fullEdgeScore = (myFullEdges - opponentFullEdges) * 260;
+
+      const myCornerAccess = this.validCornerMoves(player);
+      const opponentCornerAccess = this.validCornerMoves(opponent);
+      const cornerAccessScore = (myCornerAccess - opponentCornerAccess) * 420;
+
+      score += stableEdgeScore + fullEdgeScore + cornerAccessScore;
+    }
+
+    return score;
   }
 
   cornerCount(player) {
@@ -367,6 +448,53 @@ class ReversiGame {
       }
     }
     return total;
+  }
+
+  validCornerMoves(player) {
+    return this.validMoves(player).filter((move) => CORNERS.some((corner) => samePosition(corner, move))).length;
+  }
+
+  stableEdgeDiscs(player) {
+    const stable = new Set();
+    const scanEdge = (start, deltaRow, deltaColumn) => {
+      let row = start.row;
+      let column = start.column;
+      while (isOnBoard({ row, column }) && this.board[row][column] === player) {
+        stable.add(`${row}:${column}`);
+        row += deltaRow;
+        column += deltaColumn;
+      }
+    };
+
+    if (this.board[0][0] === player) {
+      scanEdge({ row: 0, column: 0 }, 0, 1);
+      scanEdge({ row: 0, column: 0 }, 1, 0);
+    }
+    if (this.board[0][7] === player) {
+      scanEdge({ row: 0, column: 7 }, 0, -1);
+      scanEdge({ row: 0, column: 7 }, 1, 0);
+    }
+    if (this.board[7][0] === player) {
+      scanEdge({ row: 7, column: 0 }, 0, 1);
+      scanEdge({ row: 7, column: 0 }, -1, 0);
+    }
+    if (this.board[7][7] === player) {
+      scanEdge({ row: 7, column: 7 }, 0, -1);
+      scanEdge({ row: 7, column: 7 }, -1, 0);
+    }
+
+    return stable.size;
+  }
+
+  fullEdgeCount(player) {
+    const edges = [
+      Array.from({ length: BOARD_SIZE }, (_, index) => ({ row: 0, column: index })),
+      Array.from({ length: BOARD_SIZE }, (_, index) => ({ row: 7, column: index })),
+      Array.from({ length: BOARD_SIZE }, (_, index) => ({ row: index, column: 0 })),
+      Array.from({ length: BOARD_SIZE }, (_, index) => ({ row: index, column: 7 })),
+    ];
+
+    return edges.reduce((total, edge) => total + (edge.every((position) => this.discAt(position) === player) ? 1 : 0), 0);
   }
 
   frontierCount(player) {
@@ -483,7 +611,8 @@ function createBoard() {
 
 function syncRoles() {
   ELEMENTS.blackRole.textContent = state.mode === "solo" ? "あなた" : "先手";
-  ELEMENTS.whiteRole.textContent = state.mode === "solo" ? "CPU" : "後手";
+  ELEMENTS.whiteRole.textContent = state.mode === "solo" ? `CPU・${currentAIProfile().label}` : "後手";
+  ELEMENTS.difficultyPanel.classList.toggle("is-hidden", state.mode !== "solo");
 }
 
 function updateCounts() {
@@ -578,11 +707,11 @@ function scheduleAIMove() {
   }
 
   state.aiThinking = true;
-  updateStatus("CPU が深く読んでいます…");
+  updateStatus(`CPU（${currentAIProfile().label}）が深く読んでいます…`);
   renderBoard();
 
   window.setTimeout(() => {
-    const details = state.game.bestMoveDetails("white");
+    const details = state.game.bestMoveDetails("white", currentAIProfile());
     if (details === null) {
       state.aiThinking = false;
       advanceTurn();
@@ -692,6 +821,10 @@ function resetGame() {
   renderBoard();
 }
 
+function currentAIProfile() {
+  return AI_LEVELS[state.aiLevel];
+}
+
 function attachEvents() {
   ELEMENTS.resetButton.addEventListener("click", () => resetGame());
 
@@ -704,6 +837,21 @@ function attachEvents() {
 
       state.mode = nextMode;
       for (const candidate of ELEMENTS.modeButtons) {
+        candidate.classList.toggle("is-active", candidate === button);
+      }
+      resetGame();
+    });
+  }
+
+  for (const button of ELEMENTS.difficultyButtons) {
+    button.addEventListener("click", () => {
+      const nextLevel = button.dataset.difficulty;
+      if (nextLevel === undefined || nextLevel === state.aiLevel) {
+        return;
+      }
+
+      state.aiLevel = nextLevel;
+      for (const candidate of ELEMENTS.difficultyButtons) {
         candidate.classList.toggle("is-active", candidate === button);
       }
       resetGame();
