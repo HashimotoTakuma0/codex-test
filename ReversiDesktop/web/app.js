@@ -63,6 +63,32 @@ const AI_LEVELS = {
 };
 
 const AI_PROGRESS_YIELD_MS = 16;
+const AI_TIME_LIMITS_MS = {
+  strongest: 10000,
+};
+const TT_EXACT = "exact";
+const TT_LOWER = "lower";
+const TT_UPPER = "upper";
+const ENDGAME_EXACT_EMPTY_LIMIT = 12;
+const OPENING_BOOK = new Map([
+  ["...................b.......bb......bw...........................", { row: 2, column: 2 }],
+  ["..........................bbb......bw...........................", { row: 2, column: 2 }],
+  ["...........................wb......bbb..........................", { row: 5, column: 5 }],
+  ["...........................wb......bb.......b...................", { row: 5, column: 5 }],
+]);
+const FULL_BOARD_MASK = (1n << 64n) - 1n;
+const NOT_A_FILE = 0xfefefefefefefefen;
+const NOT_H_FILE = 0x7f7f7f7f7f7f7f7fn;
+const BITBOARD_DIRECTIONS = [
+  { shift: 8n, mask: FULL_BOARD_MASK },
+  { shift: -8n, mask: FULL_BOARD_MASK },
+  { shift: 1n, mask: NOT_H_FILE },
+  { shift: -1n, mask: NOT_A_FILE },
+  { shift: 9n, mask: NOT_H_FILE },
+  { shift: 7n, mask: NOT_A_FILE },
+  { shift: -7n, mask: NOT_H_FILE },
+  { shift: -9n, mask: NOT_A_FILE },
+];
 
 const ELEMENTS = {
   blackCount: document.querySelector("#black-count"),
@@ -95,6 +121,10 @@ class ReversiGame {
   constructor(board = null, lastMove = null) {
     this.board = board ? cloneBoard(board) : createInitialBoard();
     this.lastMove = lastMove ? { ...lastMove } : null;
+    this.countCache = new Map();
+    this.moveCache = new Map();
+    this.bitboardCache = null;
+    this.serializedBoard = null;
   }
 
   clone() {
@@ -134,16 +164,54 @@ class ReversiGame {
   }
 
   validMoves(player) {
-    const moves = [];
+    const cached = this.moveCache.get(player);
+    if (cached !== undefined) {
+      return cached.map((move) => ({ ...move }));
+    }
+
+    const moves = bitboardToMoves(this.legalMoveBits(player));
+    this.moveCache.set(player, moves);
+    return moves.map((move) => ({ ...move }));
+  }
+
+  bitboards() {
+    if (this.bitboardCache !== null) {
+      return this.bitboardCache;
+    }
+
+    let black = 0n;
+    let white = 0n;
     for (let row = 0; row < BOARD_SIZE; row += 1) {
       for (let column = 0; column < BOARD_SIZE; column += 1) {
-        const move = { row, column };
-        if (this.captures(move, player).length > 0) {
-          moves.push(move);
+        const bit = positionBit({ row, column });
+        if (this.board[row][column] === "black") {
+          black |= bit;
+        } else if (this.board[row][column] === "white") {
+          white |= bit;
         }
       }
     }
-    return moves;
+
+    this.bitboardCache = { black, white };
+    return this.bitboardCache;
+  }
+
+  legalMoveBits(player) {
+    const boards = this.bitboards();
+    const own = boards[player];
+    const opponent = boards[opponentOf(player)];
+    const empty = ~(own | opponent) & FULL_BOARD_MASK;
+    let legal = 0n;
+
+    for (const direction of BITBOARD_DIRECTIONS) {
+      let captured = shiftBits(own, direction) & opponent;
+      for (let step = 0; step < 5; step += 1) {
+        captured |= shiftBits(captured, direction) & opponent;
+      }
+      legal |= shiftBits(captured, direction) & empty;
+    }
+
+    return legal;
   }
 
   performMove(move, player) {
@@ -157,10 +225,23 @@ class ReversiGame {
       this.board[position.row][position.column] = player;
     }
     this.lastMove = { ...move };
+    this.clearCaches();
     return captured;
   }
 
+  clearCaches() {
+    this.countCache.clear();
+    this.moveCache.clear();
+    this.bitboardCache = null;
+    this.serializedBoard = null;
+  }
+
   count(disc) {
+    const cached = this.countCache.get(disc);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     let total = 0;
     for (const row of this.board) {
       for (const cell of row) {
@@ -169,10 +250,16 @@ class ReversiGame {
         }
       }
     }
+    this.countCache.set(disc, total);
     return total;
   }
 
   get emptyCount() {
+    const cached = this.countCache.get("empty");
+    if (cached !== undefined) {
+      return cached;
+    }
+
     let total = 0;
     for (const row of this.board) {
       for (const cell of row) {
@@ -181,6 +268,7 @@ class ReversiGame {
         }
       }
     }
+    this.countCache.set("empty", total);
     return total;
   }
 
@@ -199,6 +287,13 @@ class ReversiGame {
       return null;
     }
     return black > white ? "black" : "white";
+  }
+
+  boardKey() {
+    if (this.serializedBoard === null) {
+      this.serializedBoard = serializeBoard(this.board);
+    }
+    return this.serializedBoard;
   }
 
   bestMoveDetails(player, profile) {
@@ -237,12 +332,22 @@ class ReversiGame {
       return null;
     }
 
-    const depth = this.searchDepth(profile);
+    const bookMove = this.bookMove(player, moves);
+    if (bookMove !== null) {
+      return {
+        move: bookMove,
+      };
+    }
+
+    const maxDepth = this.searchDepth(profile);
+    const exactEndgame = this.emptyCount <= ENDGAME_EXACT_EMPTY_LIMIT;
     const table = new Map();
-    const beta = Number.POSITIVE_INFINITY;
     const startedAt = performance.now();
+    const timeLimitMs = AI_TIME_LIMITS_MS[profile.id] ?? null;
+    const deadlineAt = timeLimitMs === null ? Number.POSITIVE_INFINITY : startedAt + timeLimitMs;
     const searchContext = {
       cancelled: false,
+      deadlineAt,
       lastYieldAt: startedAt,
       nodes: 0,
       onPulse: () => {
@@ -250,48 +355,102 @@ class ReversiGame {
           completed: 0,
           total: moves.length,
           elapsedMs: performance.now() - startedAt,
+          searchedNodes: searchContext.nodes,
+          timeLimitMs,
+          timedOut: searchContext.timedOut,
         });
       },
       shouldCancel: options.shouldCancel,
+      timedOut: false,
     };
-    let alpha = Number.NEGATIVE_INFINITY;
     let bestMove = moves[0];
     let bestScore = Number.NEGATIVE_INFINITY;
+    let completed = 0;
 
-    for (let index = 0; index < moves.length; index += 1) {
+    for (let depth = 1; depth <= maxDepth; depth += 1) {
       if (options.shouldCancel?.() === true || searchContext.cancelled) {
         return null;
       }
+      if (timeLimitMs !== null && performance.now() >= deadlineAt) {
+        searchContext.timedOut = true;
+        break;
+      }
 
-      const move = moves[index];
-      const simulated = this.clone();
-      simulated.performMove(move, player);
-      const childScore = await simulated.negamaxAsync(opponentOf(player), depth - 1, -beta, -alpha, false, table, profile, searchContext);
+      const result = await this.searchRootAsync(player, depth, table, profile, searchContext, bestMove);
       if (searchContext.cancelled) {
         return null;
       }
-      const score = -childScore;
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestMove = move;
+      if (searchContext.timedOut) {
+        break;
       }
-      alpha = Math.max(alpha, score);
-
-      const completed = index + 1;
+      bestMove = result.move;
+      bestScore = result.score;
+      completed = depth;
       options.onProgress?.({
         completed,
-        total: moves.length,
+        total: maxDepth,
         elapsedMs: performance.now() - startedAt,
+        searchedNodes: searchContext.nodes,
+        timeLimitMs,
+        timedOut: searchContext.timedOut,
+        unit: "depth",
       });
 
-      if (completed < moves.length) {
+      if (exactEndgame && depth === maxDepth) {
+        break;
+      }
+      if (completed < maxDepth) {
         await wait(AI_PROGRESS_YIELD_MS);
       }
     }
 
     return {
       move: bestMove,
+      score: bestScore,
+      depth: completed,
+      timedOut: searchContext.timedOut,
+    };
+  }
+
+  async searchRootAsync(player, depth, table, profile, context, preferredMove) {
+    const beta = Number.POSITIVE_INFINITY;
+    let alpha = Number.NEGATIVE_INFINITY;
+    let bestMove = preferredMove;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    const moves = this.orderedMoves(player, profile, preferredMove);
+    let isFirstMove = true;
+
+    for (const move of moves) {
+      if (context.cancelled || context.timedOut) {
+        break;
+      }
+
+      const simulated = this.clone();
+      simulated.performMove(move, player);
+      let score;
+      if (isFirstMove) {
+        score = -await simulated.negamaxAsync(opponentOf(player), depth - 1, -beta, -alpha, false, table, profile, context);
+        isFirstMove = false;
+      } else {
+        score = -await simulated.negamaxAsync(opponentOf(player), depth - 1, -alpha - 1, -alpha, false, table, profile, context);
+        if (score > alpha && score < beta && context.cancelled === false && context.timedOut === false) {
+          score = -await simulated.negamaxAsync(opponentOf(player), depth - 1, -beta, -score, false, table, profile, context);
+        }
+      }
+      if (context.cancelled || context.timedOut) {
+        break;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMove = move;
+      }
+      alpha = Math.max(alpha, score);
+    }
+
+    return {
+      move: bestMove,
+      score: bestScore,
     };
   }
 
@@ -313,25 +472,47 @@ class ReversiGame {
       return this.emptyCount;
     }
     if (this.emptyCount <= 18) {
-      return 13;
+      return 11;
     }
     if (this.emptyCount <= 24) {
-      return 12;
-    }
-    if (this.emptyCount <= 32) {
       return 10;
     }
-    if (this.emptyCount <= 44) {
-      return 9;
+    if (this.emptyCount <= 32) {
+      return 8;
     }
-    if (this.emptyCount <= 52) {
+    if (this.emptyCount <= 44) {
       return 7;
     }
-    return 6;
+    if (this.emptyCount <= 52) {
+      return 6;
+    }
+    return 5;
   }
 
-  orderedMoves(player, profile) {
-    return this.validMoves(player).sort((lhs, rhs) => this.moveOrderingScore(rhs, player, profile) - this.moveOrderingScore(lhs, player, profile));
+  bookMove(player, moves) {
+    if (player !== "white") {
+      return null;
+    }
+
+    const candidate = OPENING_BOOK.get(this.boardKey());
+    if (candidate === undefined) {
+      return null;
+    }
+    return moves.some((move) => samePosition(move, candidate)) ? candidate : null;
+  }
+
+  orderedMoves(player, profile, preferredMove = null) {
+    return this.validMoves(player).sort((lhs, rhs) => {
+      if (preferredMove !== null) {
+        if (samePosition(lhs, preferredMove)) {
+          return -1;
+        }
+        if (samePosition(rhs, preferredMove)) {
+          return 1;
+        }
+      }
+      return this.moveOrderingScore(rhs, player, profile) - this.moveOrderingScore(lhs, player, profile);
+    });
   }
 
   moveOrderingScore(move, player, profile) {
@@ -374,8 +555,8 @@ class ReversiGame {
 
   negamax(player, depth, alpha, beta, previousTurnWasPass, table, profile) {
     const key = profile.id === "strong"
-      ? `${serializeBoard(this.board)}|${player}|${depth}|${previousTurnWasPass ? 1 : 0}|${profile.id}`
-      : `${serializeBoard(this.board)}|${player}|${previousTurnWasPass ? 1 : 0}|${profile.id}`;
+      ? `${this.boardKey()}|${player}|${depth}|${previousTurnWasPass ? 1 : 0}|${profile.id}`
+      : `${this.boardKey()}|${player}|${previousTurnWasPass ? 1 : 0}|${profile.id}`;
     const cached = table.get(key);
     if (cached !== undefined && (profile.id === "strong" || cached.depth >= depth)) {
       return cached.score;
@@ -419,6 +600,7 @@ class ReversiGame {
   }
 
   async negamaxAsync(player, depth, alpha, beta, previousTurnWasPass, table, profile, context) {
+    const alphaOriginal = alpha;
     context.nodes += 1;
     if (context.nodes % 2048 === 0) {
       const now = performance.now();
@@ -430,55 +612,89 @@ class ReversiGame {
           context.cancelled = true;
           return 0;
         }
+        if (context.deadlineAt !== Number.POSITIVE_INFINITY && now >= context.deadlineAt) {
+          context.timedOut = true;
+          return this.evaluate(player, profile);
+        }
       }
     }
 
     const key = profile.id === "strong"
-      ? `${serializeBoard(this.board)}|${player}|${depth}|${previousTurnWasPass ? 1 : 0}|${profile.id}`
-      : `${serializeBoard(this.board)}|${player}|${previousTurnWasPass ? 1 : 0}|${profile.id}`;
+      ? `${this.boardKey()}|${player}|${depth}|${previousTurnWasPass ? 1 : 0}|${profile.id}`
+      : `${this.boardKey()}|${player}|${previousTurnWasPass ? 1 : 0}|${profile.id}`;
     const cached = table.get(key);
-    if (cached !== undefined && (profile.id === "strong" || cached.depth >= depth)) {
-      return cached.score;
+    if (cached !== undefined && cached.depth >= depth) {
+      if (cached.flag === TT_EXACT) {
+        return cached.score;
+      }
+      if (cached.flag === TT_LOWER) {
+        alpha = Math.max(alpha, cached.score);
+      } else if (cached.flag === TT_UPPER) {
+        beta = Math.min(beta, cached.score);
+      }
+      if (alpha >= beta) {
+        return cached.score;
+      }
     }
 
     if (this.isGameOver || (previousTurnWasPass && this.validMoves(player).length === 0)) {
       const score = this.terminalScore(player);
-      table.set(key, { depth, score });
+      table.set(key, { depth, flag: TT_EXACT, move: null, score });
       return score;
     }
 
     if (depth === 0) {
       const score = this.evaluate(player, profile);
-      table.set(key, { depth, score });
+      table.set(key, { depth, flag: TT_EXACT, move: null, score });
       return score;
     }
 
-    const moves = this.orderedMoves(player, profile);
+    const moves = this.orderedMoves(player, profile, cached?.move ?? null);
     if (moves.length === 0) {
       const score = -await this.negamaxAsync(opponentOf(player), depth, -beta, -alpha, true, table, profile, context);
-      table.set(key, { depth, score });
+      table.set(key, { depth, flag: TT_EXACT, move: null, score });
       return score;
     }
 
     let localAlpha = alpha;
+    let bestMove = moves[0];
     let bestScore = Number.NEGATIVE_INFINITY;
+    let isFirstMove = true;
 
     for (const move of moves) {
-      if (context.cancelled) {
-        return 0;
+      if (context.cancelled || context.timedOut) {
+        return this.evaluate(player, profile);
       }
 
       const simulated = this.clone();
       simulated.performMove(move, player);
-      const score = -await simulated.negamaxAsync(opponentOf(player), depth - 1, -beta, -localAlpha, false, table, profile, context);
-      bestScore = Math.max(bestScore, score);
+      let score;
+      if (isFirstMove) {
+        score = -await simulated.negamaxAsync(opponentOf(player), depth - 1, -beta, -localAlpha, false, table, profile, context);
+        isFirstMove = false;
+      } else {
+        score = -await simulated.negamaxAsync(opponentOf(player), depth - 1, -localAlpha - 1, -localAlpha, false, table, profile, context);
+        if (score > localAlpha && score < beta && context.cancelled === false && context.timedOut === false) {
+          score = -await simulated.negamaxAsync(opponentOf(player), depth - 1, -beta, -score, false, table, profile, context);
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestMove = move;
+      }
       localAlpha = Math.max(localAlpha, score);
       if (localAlpha >= beta) {
         break;
       }
     }
 
-    table.set(key, { depth, score: bestScore });
+    let flag = TT_EXACT;
+    if (bestScore <= alphaOriginal) {
+      flag = TT_UPPER;
+    } else if (bestScore >= beta) {
+      flag = TT_LOWER;
+    }
+    table.set(key, { depth, flag, move: bestMove, score: bestScore });
     return bestScore;
   }
 
@@ -521,6 +737,7 @@ class ReversiGame {
     const cornerPressureScore = (myCornerPressure - opponentCornerPressure) * 120;
 
     const discDifference = this.count(player) - this.count(opponent);
+    const parityScore = this.parityScore(player) * (this.emptyCount <= 18 ? 180 : 35);
     const discWeight = profile.id === "strong"
       ? (this.emptyCount <= 12 ? 140 : this.emptyCount <= 22 ? 35 : 8)
       : (this.emptyCount <= 12 ? 200 : this.emptyCount <= 24 ? 24 : 2);
@@ -532,6 +749,7 @@ class ReversiGame {
       + edgeScore
       + potentialMobilityScore
       + cornerPressureScore
+      + parityScore
       + (discDifference * discWeight);
 
     if (profile.id === "strongest") {
@@ -555,6 +773,18 @@ class ReversiGame {
 
   cornerCount(player) {
     return CORNERS.reduce((total, corner) => total + (this.discAt(corner) === player ? 1 : 0), 0);
+  }
+
+  parityScore(player) {
+    if (this.emptyCount > 28) {
+      return 0;
+    }
+
+    const opponent = opponentOf(player);
+    const myMoves = this.validMoves(player).length;
+    const opponentMoves = this.validMoves(opponent).length;
+    const moveParity = (this.emptyCount % 2 === 0 ? -1 : 1) * (myMoves - opponentMoves);
+    return moveParity;
   }
 
   weightedBoardScore(player) {
@@ -705,6 +935,31 @@ function isOnBoard(position) {
   return position.row >= 0 && position.row < BOARD_SIZE && position.column >= 0 && position.column < BOARD_SIZE;
 }
 
+function positionBit(position) {
+  return 1n << BigInt((position.row * BOARD_SIZE) + position.column);
+}
+
+function shiftBits(bits, direction) {
+  const masked = bits & direction.mask;
+  if (direction.shift > 0n) {
+    return (masked << direction.shift) & FULL_BOARD_MASK;
+  }
+  return masked >> -direction.shift;
+}
+
+function bitboardToMoves(bits) {
+  const moves = [];
+  for (let index = 0; index < 64; index += 1) {
+    if ((bits & (1n << BigInt(index))) !== 0n) {
+      moves.push({
+        row: Math.floor(index / BOARD_SIZE),
+        column: index % BOARD_SIZE,
+      });
+    }
+  }
+  return moves;
+}
+
 function opponentOf(player) {
   return player === "black" ? "white" : "black";
 }
@@ -728,8 +983,11 @@ function wait(milliseconds) {
 }
 
 function formatDuration(milliseconds) {
-  if (milliseconds <= 0 || Number.isFinite(milliseconds) === false) {
+  if (Number.isFinite(milliseconds) === false) {
     return "推定中";
+  }
+  if (milliseconds <= 0) {
+    return "約0秒";
   }
 
   const seconds = Math.ceil(milliseconds / 1000);
@@ -746,15 +1004,30 @@ function formatDuration(milliseconds) {
 }
 
 function updateAIProgress(profile, progress) {
-  if (progress.completed === 0) {
-    updateStatus(`CPU（${profile.label}）思考中 0/${progress.total}・予測残り思考時間 推定中`);
+  const elapsedMs = progress.elapsedMs ?? 0;
+  const timeLimitMs = progress.timeLimitMs ?? AI_TIME_LIMITS_MS[profile.id] ?? null;
+  const remainingBudgetMs = Math.max(0, timeLimitMs - elapsedMs);
+
+  if (progress.timedOut === true) {
+    updateStatus(`CPU（${profile.label}）思考を切り上げ中`);
     return;
   }
 
-  const remainingMoves = progress.total - progress.completed;
-  const averageMs = progress.elapsedMs / progress.completed;
-  const remainingMs = remainingMoves * averageMs;
-  updateStatus(`CPU（${profile.label}）思考中 ${progress.completed}/${progress.total}・予測残り思考時間 ${formatDuration(remainingMs)}`);
+  if (progress.completed === 0) {
+    updateStatus(timeLimitMs === null
+      ? `CPU（${profile.label}）思考中`
+      : `CPU（${profile.label}）思考中・残り最大 ${formatDuration(remainingBudgetMs)}`);
+    return;
+  }
+
+  if (progress.completed >= progress.total) {
+    updateStatus(`CPU（${profile.label}）思考完了`);
+    return;
+  }
+
+  updateStatus(timeLimitMs === null
+    ? `CPU（${profile.label}）思考中 ${progress.completed}/${progress.total}`
+    : `CPU（${profile.label}）思考中 ${progress.completed}/${progress.total}・残り最大 ${formatDuration(remainingBudgetMs)}`);
 }
 
 function createBoard() {
@@ -877,7 +1150,9 @@ function scheduleAIMove() {
   const profile = currentAIProfile();
   state.aiSearchId = searchId;
   state.aiThinking = true;
-  updateStatus(`CPU（${profile.label}）思考中・予測残り思考時間 推定中`);
+  updateStatus(AI_TIME_LIMITS_MS[profile.id] === undefined
+    ? `CPU（${profile.label}）思考中`
+    : `CPU（${profile.label}）思考中・残り最大 ${formatDuration(AI_TIME_LIMITS_MS[profile.id])}`);
   renderBoard();
 
   window.setTimeout(async () => {
