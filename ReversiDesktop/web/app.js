@@ -82,7 +82,7 @@ const state = {
   game: null,
   isAnimating: false,
   lastMove: null,
-  aiLevel: "strongest",
+  aiLevel: "strong",
   mode: "solo",
 };
 
