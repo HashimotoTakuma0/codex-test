@@ -5,9 +5,11 @@ on:
   push:
     paths:
       - "ReversiDesktop/**"
+      - ".github/workflows/windows-build.yml"
   pull_request:
     paths:
       - "ReversiDesktop/**"
+      - ".github/workflows/windows-build.yml"
 
 jobs:
   build-windows:

@@ -7,3 +7,4 @@ ReversiDesktop/src-tauri/gen/
 *.xcuserstate
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
+**/xcuserdata/

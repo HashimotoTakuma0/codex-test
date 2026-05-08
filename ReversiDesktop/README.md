@@ -1,6 +1,7 @@
 # Reversi Desktop
 
 Mac と Windows 配布を見据えた Reversi の Tauri デスクトップ版です。
+ブラウザ版は GitHub Pages で `https://hashimototakuma0.github.io/codex-test/` として公開できます。
 
 ## 今あるもの
 
@@ -34,7 +35,7 @@ macOS では配布物が次に出力されます。
 
 ## Windows について
 
-Windows 版は [windows-build.yml](/Users/thashimoto/projects/codex-test/ReversiDesktop/.github/workflows/windows-build.yml:1) を追加してあります。
+Windows 版は [windows-build.yml](/Users/thashimoto/projects/codex-test/.github/workflows/windows-build.yml:1) を追加してあります。
 GitHub Actions で実行すると、次の配布物を Artifact として取得できます。
 
 - `bundle/nsis/*.exe`
